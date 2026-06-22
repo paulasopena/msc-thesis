@@ -1,6 +1,6 @@
 # LLVM Optimization Effects on WCET and ACET
 
-This document records the experiment we built to study how LLVM optimization passes affect:
+This document records the experiment built to study how LLVM optimization passes affect:
 
 - **WCET**: Worst-Case Execution Time, computed with LLVMTA.
 - **ACET/AET**: Average-Case/Average Execution Time, measured by repeatedly executing host-native binaries built from the same LLVM IR variants.
