@@ -76,9 +76,9 @@ testcases/batch_testing/benchmark_configs/survey30.csv
 
 It contains benchmarks from:
 
-- Mälardalen-style smoke benchmarks
-- TACLeBench-style smoke benchmarks
-- PolyBench-style smoke kernels
+- Mälardalen-style benchmarks
+- TACLeBench-style benchmarks
+- PolyBench-style benchmarks
 - Synthetic cache/path probes
 
 The benchmark groups are intentionally mixed so we can observe optimization behavior across branch-heavy, loop-heavy, arithmetic, memory, and cache-sensitive programs.
