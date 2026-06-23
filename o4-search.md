@@ -104,6 +104,140 @@ function(instcombine, dce), globaldce
 
 This means O4-WCET is not a fixed LLVM optimization level. It is a measured search over short pass sequences, using LLVMTA WCET as the objective.
 
+### How Candidate Counts Work
+
+A candidate is one ordered pass sequence generated from the benchmark's pass pool. For example:
+
+```text
+loop-rotate,scc-oz-module-inliner,loop-reduce
+```
+
+means:
+
+```text
+baseline + loop-rotate + scc-oz-module-inliner + loop-reduce + cleanup
+```
+
+The order matters. `loop-rotate,scc-oz-module-inliner` and `scc-oz-module-inliner,loop-rotate` are different candidates, because LLVM sees a different IR before the second pass runs.
+
+The search is a beam search, not an exhaustive search of every possible ordering. With:
+
+```text
+--top-passes 10
+--max-depth 3
+--beam-width 6
+```
+
+the script behaves like this for each benchmark:
+
+1. **Depth 1:** evaluate all 10 single-pass candidates.
+2. Keep the best 6 bounded candidates by lowest WCET UB.
+3. **Depth 2:** extend only those 6 prefixes with the remaining passes. Because pass repetition is skipped, each one-pass prefix can be extended by 9 other passes, so this evaluates up to `6 * 9 = 54` candidates.
+4. Keep the best 6 bounded two-pass candidates.
+5. **Depth 3:** extend only those 6 two-pass prefixes. Each two-pass prefix can be extended by 8 remaining passes, so this evaluates up to `6 * 8 = 48` candidates.
+
+This keeps the search small enough to run while still testing ordered combinations. If we exhaustively searched all non-repeating sequences from 10 passes up to depth 3, we would evaluate:
+
+```text
+10 + (10 * 9) + (10 * 9 * 8) = 820 candidates per benchmark
+```
+
+The beam-search run evaluates at most:
+
+```text
+10 + 54 + 48 = 112 candidates per benchmark
+```
+
+The tradeoff is that the search can miss a sequence whose first pass looks bad alone but becomes useful later. The benefit is that it makes the experiment practical for 30 benchmarks.
+
+### Example: `polybench_jacobi2d_smoke`
+
+For `polybench_jacobi2d_smoke`, the selected pass pool was:
+
+```text
+scc-oz-module-inliner
+loop-rotate
+jump-threading
+loop-simplifycfg
+break-crit-edges
+reassociate
+loop-reduce
+early-cse<memssa>
+newgvn
+licm
+```
+
+The run printed:
+
+```text
+### Benchmark: polybench_jacobi2d_smoke
+  pass pool: scc-oz-module-inliner, loop-rotate, jump-threading, loop-simplifycfg, break-crit-edges, reassociate, loop-reduce, early-cse<memssa>, newgvn, licm
+  depth 1: evaluated 10 candidates; best ub=32771
+  depth 2: evaluated 54 candidates; best ub=24526
+  depth 3: evaluated 48 candidates; best ub=24473
+```
+
+This means:
+
+- Depth 1 tested the 10 individual passes.
+- The best depth-1 candidate was `scc-oz-module-inliner` with UB `32771`.
+- The six depth-1 prefixes kept for depth 2 were:
+
+| Kept depth-1 prefix | UB |
+|---|---:|
+| `scc-oz-module-inliner` | 32771 |
+| `loop-rotate` | 58807 |
+| `break-crit-edges` | 65205 |
+| `reassociate` | 65205 |
+| `jump-threading` | 72638 |
+| `loop-simplifycfg` | 72638 |
+
+Depth 2 then tried every one of those prefixes followed by each remaining pass. The best depth-2 candidates included:
+
+| Candidate pipeline | UB | Delta vs baseline | Delta vs O3 |
+|---|---:|---:|---:|
+| `loop-rotate,scc-oz-module-inliner` | 24526 | -40679 | 0 |
+| `scc-oz-module-inliner,loop-rotate` | 29088 | -36117 | 4562 |
+| `scc-oz-module-inliner,break-crit-edges` | 31633 | -33572 | 7107 |
+| `scc-oz-module-inliner,licm` | 31633 | -33572 | 7107 |
+| `scc-oz-module-inliner,loop-simplifycfg` | 31633 | -33572 | 7107 |
+| `break-crit-edges,scc-oz-module-inliner` | 32771 | -32434 | 8245 |
+
+The six depth-2 prefixes kept for depth 3 were the six rows above. Depth 3 extended those prefixes with one more remaining pass. The best depth-3 candidates were:
+
+| Candidate pipeline | UB | Delta vs baseline | Delta vs O3 |
+|---|---:|---:|---:|
+| `loop-rotate,scc-oz-module-inliner,loop-reduce` | 24473 | -40732 | -53 |
+| `loop-rotate,scc-oz-module-inliner,early-cse<memssa>` | 24526 | -40679 | 0 |
+| `loop-rotate,scc-oz-module-inliner,jump-threading` | 24526 | -40679 | 0 |
+| `loop-rotate,scc-oz-module-inliner,licm` | 24526 | -40679 | 0 |
+| `loop-rotate,scc-oz-module-inliner,loop-simplifycfg` | 24526 | -40679 | 0 |
+| `loop-rotate,scc-oz-module-inliner,reassociate` | 24526 | -40679 | 0 |
+
+So for this benchmark, the key improvement came from discovering that:
+
+```text
+loop-rotate -> scc-oz-module-inliner -> loop-reduce
+```
+
+was slightly better than LLVM `O3` for the LLVMTA WCET bound. The final UB was `24473`, which is `53` cycles lower than O3 for this benchmark.
+
+To inspect all candidates for a benchmark, filter the search CSV by `benchmark` and `depth`:
+
+```bash
+python3 - <<'PY'
+import csv
+from pathlib import Path
+path = Path('testcases/batch_testing/results/o4_wcet_search_survey30_deep/summary.csv')
+benchmark = 'polybench_jacobi2d_smoke'
+with path.open(newline='') as f:
+    rows = [r for r in csv.DictReader(f) if r['benchmark'] == benchmark and r['depth'] in {'1', '2', '3'}]
+rows.sort(key=lambda r: (int(r['ub']) if r['ub'] else 10**18, r['pipeline']))
+for r in rows:
+    print(r['depth'], r['ub'], r['delta_vs_o3'], r['pipeline'])
+PY
+```
+
 ### O4-WCET Output
 
 The main output is:
